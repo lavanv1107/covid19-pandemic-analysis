@@ -1,0 +1,502 @@
+---
+title: "COVID-19 Pandemic Analysis: Does Income Affect Mortality Rate?"
+author: "Vatanak Lavan"
+date: "09/05/2022"
+output:
+  html_document:
+    toc: yes
+    df_print: paged
+  html_notebook:
+    toc: yes
+---
+
+# Initialize
+
+```{r}
+knitr::opts_chunk$set(message = FALSE, warning = FALSE)
+```
+
+## Local Environment
+
+The package `renv` is installed to the project to maintain a reproducible workflow in RStudio. `renv` allows for the creation of a local environment with a private library to manage the project's R dependencies.
+
+```{r}
+# install.packages("renv")
+
+# Initialize new local environment with private library
+# renv::init()
+```
+
+## Tidyverse
+
+The `tidyverse` is an opinionated collection of R packages designed for data science. All of its packages share an underlying design philosophy, grammar, and data structures.
+
+Each one has tools created specifically for different points throughout the process. Utilizing `tidyverse`, specific steps are followed in undertaking a data science project.
+
+```{r message=FALSE, warning=FALSE}
+# install.packages("tidyverse")  
+library(tidyverse)
+```
+
+Many functions used throughout the programming of the project to manipulate data are provided by the `dplyr` package. It is called often to extract, modify and combine tibbles based on specified conditions.
+
+# Wrangle
+
+## Import
+
+### Connections
+
+The package `odbc` is installed to setup connections to the databases in RStudio via Microsoft ODBC (Open Database Connectivity) drivers. It serves as a backend which the `DBI` package uses to define a frontend communication interface in RStudio.
+
+```{r}
+# install.packages("odbc")
+library(odbc)
+
+# List available ODBC User data sources on system
+# odbcListDataSources()
+```
+
+`odbc` requires the installation of MySQL Connector/ODBC. ODBC User data sources are added through Microsoft ODBC Data Source Administrator using MySQL ODBC 8.0 ANSI Driver. Connection parameters are specified in MySQL Connector/ODBC.
+
+Connections are created from User DSNs (Data Source Name) by specifying its name.
+
+```{r}
+# Create connection to simplemaps counties database 
+con_us_counties <- dbConnect(odbc(), "simplemaps")
+
+# Create connection to 2021spfdb COVID-19 deaths database
+con_covid19_deaths <- dbConnect(odbc(), "2021spfdb")
+```
+
+### Queried Tables
+
+Tables fetched from the submitted SQL queries are imported as tibbles. Tibbles are a table format provided by the `tibble` package. They inherit R's traditional data.frame class, but have improved behaviors.
+
+```{r}
+# Create SQL query string 
+query_us_counties <- "SELECT * from uscounties"
+
+# Fetch queried table from as tidyr tibble
+us_counties <- dbGetQuery(con_us_counties,query_us_counties) %>% 
+  as_tibble()
+
+us_counties
+```
+
+The `map_id` column in the county_data table contain FIPS (Federal Information Processing Standards) codes of each corresponding county. It is renamed as county_fips to match that of the uscounties table.
+
+Rows are retrieved where the date value is `2022-05-13` to maintain accuracy. This is because the data in the simplemaps United States Counties Database was updated as of May 13, 2022.
+
+```{r}
+# Create SQL query string
+query_covid19_deaths <- "SELECT map_id as county_fips, cases, deaths FROM county_data WHERE date='2022-05-13'"
+
+# Fetch queried table as tidyr tibble
+covid19_deaths <- dbGetQuery(con_covid19_deaths, query_covid19_deaths) %>%
+  as_tibble()
+
+covid19_deaths
+```
+
+```{r}
+dbDisconnect(con_us_counties)
+dbDisconnect(con_covid19_deaths)
+
+rm(con_us_counties, con_covid19_deaths, query_us_counties, query_covid19_deaths)
+```
+
+### Excel Spreadsheet
+
+We also utilize the the national-level median household income from the U.S. Census Bureau as a means of categorizing a county's own median household income in comparison to that of the whole country.
+
+```{r}
+library(readxl)
+
+us_states_income <- read_xlsx(
+  "us_census_median_household_income.xlsx",
+  col_names = c("state_name","median_income_state"),
+  range = "A10:B60"
+  )
+
+us_states_income
+```
+
+## Tidy
+
+### Excessive Fields
+
+The simplemaps United States Counties Database contains seventy-eight fields for each county. However, a number of these are considered irrelevant and are not included.
+
+```{r}
+us_counties_income <- us_counties %>%
+  select(
+    county_fips,
+    county,
+    state_id,
+    state_name,
+    population,
+    density,
+    income_household_median
+  )
+
+us_counties_income
+```
+
+### US Territories
+
+The simplemaps United States Counties Database includes data from the US territories - American Samoa, Guam, Northern Mariana Islands, Puerto Rico, and Virgin Islands.
+
+This is excluded because the `county_data` table contains data excluding that of US territories. Additionally, the data for US territories in the `uscounties` table is filled with missing values.
+
+```{r}
+# Create list of state_id values of US territories
+territory_ids <- c("AS","GU","MP","PR","VI")
+
+# Create tibble of US territories
+us_counties_income %>% 
+  filter(state_id %in% territory_ids) 
+```
+
+```{r}
+# Create %notin% function 
+`%notin%` <- Negate(`%in%`)
+
+# Create tibble of US states
+us_counties_income <- us_counties_income %>%
+  filter(state_id %notin% territory_ids)
+
+us_counties_income
+```
+
+```{r}
+rm(territory_ids)
+```
+
+### Missing Values
+
+Handling missing values is mandatory in any data science project. The `tidyr` package offers different approaches to this. However, through inspecting the tibbles, neither of them contain any NA values.
+
+```{r}
+# Display tibble of missing values in counties_states
+us_counties_income %>% 
+  filter(if_any(everything(), is.na))
+```
+
+```{r}
+# Display tibble of missing values in covid_deaths
+covid19_deaths %>% 
+  filter(if_any(everything(), is.na))
+```
+
+## Transform
+
+### Join
+
+After tidying the tibbles, both will be combined on the `county_fips` column. This is executed through `dplyr`'s `inner_join` function which retains only rows with matches between both.
+
+```{r}
+# Merge us_counties and covid19_deaths
+us_counties_income_deaths <-
+  inner_join(us_counties_income, covid19_deaths, by = "county_fips") %>%
+  arrange(county_fips) # Arrange by county_fips column
+
+us_counties_income_deaths
+```
+
+```{r}
+rm(us_counties, covid19_deaths)
+```
+
+### Income
+
+```{r}
+# Calculate the death rate per 100,000 population
+us_counties_income_deaths <- us_counties_income_deaths %>%
+  mutate(death_rate = round(((deaths / population) * 100000), digits = 2)) %>%
+  
+  # Move the 'death_rate' column next to 'deaths'
+  relocate(death_rate, .after = deaths)
+
+us_counties_income_deaths
+```
+
+# Analyze
+
+## Classify Categories
+
+```{r}
+# Retrieve the national median household income in the 'us_states_income' dataframe
+us_income_household_median <- us_states_income$median_income_state[1]
+
+# Calculate the total population across all counties in the 'us_counties_income_deaths' dataframe
+us_population <- us_counties_income_deaths %>%
+  pull(population) %>% sum()
+
+# Calculate the total number of COVID-19 deaths across all counties in the 'us_counties_income_deaths' dataframe
+us_covid19_deaths <- us_counties_income_deaths %>%
+  pull(deaths) %>% sum()
+
+# Calculate the COVID-19 death rate per 100,000 population for the entire dataset
+us_covid19_death_rate <- (us_covid19_deaths / us_population) * 100000
+```
+
+```{r}
+rm(us_states_income)
+```
+
+```{r}
+# Add a new column 'category' with initial NA values to the 'us_counties_income_deaths' dataframe
+us_counties_income_deaths <- us_counties_income_deaths %>%
+  add_column(category = NA)
+
+# Loop through each row in the 'us_counties_income_deaths' dataframe
+for (i in 1:nrow(us_counties_income_deaths)) {
+  # Check if the median household income is less than the overall median income
+  if (us_counties_income_deaths$income_household_median[i] < us_income_household_median) {
+    # Check if the death rate is less than the overall COVID-19 death rate
+    if (us_counties_income_deaths$death_rate[i] < us_covid19_death_rate) {
+      # Assign the category "Low Income, Low Death Rate" if both conditions are met
+      us_counties_income_deaths$category[i] <- "Low Income, Low Death Rate"
+    }
+    else {
+      # Assign the category "Low Income, High Death Rate" if the income condition is met but not the death rate condition
+      us_counties_income_deaths$category[i] <- "Low Income, High Death Rate"
+    }
+  }
+  else {
+    # Check if the death rate is less than the overall COVID-19 death rate
+    if (us_counties_income_deaths$death_rate[i] < us_covid19_death_rate) {
+      # Assign the category "High Income, Low Death Rate" if the income condition is not met but the death rate condition is met
+      us_counties_income_deaths$category[i] <- "High Income, Low Death Rate"
+    }
+    else {
+      # Assign the category "High Income, High Death Rate" if neither condition is met
+      us_counties_income_deaths$category[i] <- "High Income, High Death Rate"
+    }
+  }
+}
+```
+
+```{r}
+rm(i, us_income_household_median, us_covid19_death_rate)
+```
+
+## Plot Data
+
+```{r message=FALSE, warning=FALSE}
+# install.packages("plotly")
+library(plotly)
+```
+
+### Mortality Rate
+
+```{r}
+# Create a scatter plot using Plotly
+us_counties_scatter <- plot_ly(
+  us_counties_income_deaths,
+  x = ~income_household_median / 1000,  
+  y = ~death_rate, 
+  type = 'scatter',
+  mode = 'markers',
+  text = paste(us_counties_income_deaths$county, us_counties_income_deaths$state_id, sep = ", ")
+)
+
+# Customize the layout of the scatter plot
+us_counties_scatter <- us_counties_scatter %>%
+  layout(
+    # title = "Median Household Income vs COVID-19 Death Rate in U.S. Counties (05-13-2022)",
+    xaxis = list(title = 'Median Household Income ($K)'),  # X-axis label
+    yaxis = list(title = 'COVID-19 Mortality Rate (per 100K)')  # Y-axis label
+  )
+
+us_counties_scatter
+```
+
+```{r}
+# Perform a correlation test between 'income_household_median' and 'death_rate'
+cor.test(
+  us_counties_income_deaths$income_household_median,
+  us_counties_income_deaths$death_rate
+)
+```
+
+#### Inspect Outliers
+
+```{r}
+# Create a box plot for 'income_household_median'
+plot_ly(
+  y = us_counties_income_deaths$income_household_median,  # Data for the Y-axis
+  text = paste(us_counties_income_deaths$county, us_counties_income_deaths$state_id, sep = ", "),
+  type = "box",  # Box plot type
+  name = "Median Household Income",  # Trace name for the legend
+)
+
+# Create a box plot for 'death_rate'
+plot_ly(
+  y = us_counties_income_deaths$death_rate,  # Data for the Y-axis
+  text = paste(us_counties_income_deaths$county, us_counties_income_deaths$state_id, sep = ", "),
+  type = "box",  # Box plot type
+  name = "COVID-19 Death Rate",  # Trace name for the legend
+)
+```
+
+```{r}
+# Compute the IQR of the household median income
+q1_income <- quantile(us_counties_income_deaths$income_household_median, 0.25)  # 1st Quartile
+q3_income <- quantile(us_counties_income_deaths$income_household_median, 0.75)  # 3rd Quartile
+iqr_income <- q3_income - q1_income  # Interquartile Range (IQR)
+
+# Compute the IQR of the death rate
+q1_death <- quantile(us_counties_income_deaths$death_rate, 0.25)  # 1st Quartile
+q3_death <- quantile(us_counties_income_deaths$death_rate, 0.75)  # 3rd Quartile
+iqr_death <- q3_death - q1_death  # Interquartile Range (IQR)
+
+# Identify potential outliers based on the IQR method
+us_counties_outliers_death <- us_counties_income_deaths %>%
+  filter(
+    death_rate < q1_death - 1.5 * iqr_death |  # Lower bound for death rate outliers
+    death_rate > q3_death + 1.5 * iqr_death |  # Upper bound for death rate outliers
+    income_household_median < q1_income - 1.5 * iqr_income |  # Lower bound for income outliers
+    income_household_median > q3_income + 1.5 * iqr_income  # Upper bound for income outliers
+  )
+
+us_counties_outliers_death
+```
+
+```{r}
+rm(q1_death, q3_death, iqr_death)
+```
+
+```{r}
+# Filter the 'us_counties_death_income' dataframe to select specific counties which are significant outliers
+us_counties_outliers_significant <- us_counties_income_deaths %>%
+  filter(county_fips %in% c(36061, 48301, 48311))
+
+us_counties_outliers_significant
+```
+
+```{r}
+# Create a scatter plot for all counties in blue
+us_counties_scatter <- plot_ly(
+  data = us_counties_income_deaths,
+  x = ~income_household_median / 1000,
+  y = ~death_rate,
+  type = 'scatter',
+  mode = 'markers',
+  name = "County",  # Legend label for counties
+  showlegend = FALSE  # Hide the legend for this trace
+)
+
+# Add red markers for significant outliers
+us_counties_scatter <- us_counties_scatter %>%
+  add_markers(
+    data = us_counties_outliers_significant,
+    marker = list(color = "red"),  # Mark outliers in red
+    name = "Outlier"  # Legend label for outliers
+  )
+
+# Customize the layout of the scatter plot
+us_counties_scatter <- us_counties_scatter %>%
+  layout(
+    # title = "Median Household Income vs COVID-19 Death Rate in U.S. Counties (05-13-2022)",
+    xaxis = list(title = 'Median Household Income ($K)'),  # X-axis label
+    yaxis = list(title = 'COVID-19 Mortality Rate (per 100K)')  # Y-axis label
+  )
+
+us_counties_scatter
+```
+
+# Visualize
+
+## Choropleth
+
+```{r}
+# install.packages("rjson")
+library(rjson)
+```
+
+```{r}
+# Load GeoJSON data from a URL
+us_counties_geojson <- fromJSON(file = "https://raw.githubusercontent.com/plotly/datasets/master/geojson-counties-fips.json")
+
+# Configure settings for the choropleth map
+us_counties_choropleth_config <- list(
+  scope = 'usa',  # Set the map scope to USA
+  projection = list(type = 'albers usa'),  # Set the map projection type
+  showlakes = TRUE,  # Show lakes on the map
+  lakecolor = toRGB('white')  # Set the color for lakes
+)
+```
+
+```{r}
+library(RColorBrewer)
+```
+
+```{r}
+# Convert the 'category' column to a factor
+us_counties_income_deaths <- us_counties_income_deaths %>%
+  mutate(category = factor(category)) %>% 
+
+# Create a new column 'category_numeric' and store the numeric representation of 'category'
+  mutate(category_numeric = as.numeric(category))
+
+us_counties_income_deaths
+```
+
+```{r}
+# Generate a color palette using Brewer palette 'Set1'
+foo <- brewer.pal(n = 6, name = "Set1")[c(6,3,1,2)]
+
+# Assign names to the colors based on the levels of the 'category' column in 'us_counties_income_deaths'
+names(foo) = levels(us_counties_income_deaths$category)
+
+# Define a function to calculate breaks for the color scale
+Z_Breaks = function(n) {
+  CUTS = seq(0, 1, length.out = n + 1)
+  rep(CUTS, ifelse(CUTS %in% 0:1, 1, 2))
+}
+
+# Create a data frame for the color scale
+colorScale <- data.frame(
+  z = Z_Breaks(4),  # Breaks for the color scale
+  col = rep(foo, each = 2),  # Repeating the colors
+  stringsAsFactors = FALSE  # Ensure columns are not treated as factors
+)
+```
+
+```{r}
+# Create a choropleth map
+us_counties_choropleth <- plot_ly(
+  data = us_counties_income_deaths,  # Data source
+  type = "choropleth",  # Choropleth map type
+  geojson = us_counties_geojson,  # GeoJSON data for US counties
+  locations = ~county_fips,  # Locations to map
+  z = ~category_numeric,  # Color scale values
+  colorscale = colorScale,  # Custom color scale
+  colorbar = list(
+    title = list(text = "Category", font = list(size = 16)),  # Colorbar title
+    tickvals = c(1.37, 2.13, 2.88, 3.63),  # Tick values
+    ticktext = names(foo),  # Tick text labels
+    orientation = "h",  # Horizontal colorbar
+    y = -0.2,  # Y-position of the colorbar
+    reversescale = TRUE  # Reverse the color scale
+  ),
+  marker = list(line = list(width = 0))  # Set marker line width
+)
+
+# Set a title for the choropleth map
+# us_counties_choropleth <- us_counties_choropleth %>%
+#   layout(title = "U.S. Counties by Median Household Income and COVID-19 Death Rates (05-13-2022)")
+
+# Apply the geo configuration to the choropleth map
+us_counties_choropleth <- us_counties_choropleth %>%
+  layout(geo = us_counties_choropleth_config)
+
+
+us_counties_choropleth
+```
+
+```{r}
+rm(us_counties_geojson, us_counties_choropleth_config)
+rm(foo, colorScale)
+```
